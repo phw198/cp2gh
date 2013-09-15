@@ -17,6 +17,7 @@ Options:
   --ghorg=GHORG     the organization that owns the repo, if not specified, the GHUSER will be used as owner
   --usermap=USERMAP load a file which maps CodePlex users to GitHub users
   --skipcp          skip parsing data from CodePlex and use existing issues.db file
+  --skip-closed     skip importing issues that are closed on CodePlex
   --count=COUNT     the number of issues to import (used mainly for testing)
 
 """
@@ -57,6 +58,7 @@ if __name__ == '__main__':
     password = options['--ghpass']
     org = options['--ghorg']
     skipcp = ('--skipcp' in options) and options['--skipcp']
+    skip_closed = ('--skip-closed' in options) and options['--skip-closed']
     curPage = 0
     maxCount = -1
     if options['--count']:
@@ -253,7 +255,7 @@ if __name__ == '__main__':
                 user = authorInfo.text
                 userlink = authorInfo['href']
                 date = int(comment.find('span', 'smartDate')['localtimeticks'])
-                comment = comment.find('p', 'comment_divider').text            
+                comment = comment.find('div', 'markDownOutput').text            
                 c.execute('INSERT INTO comments (IssueID, Date, User, Link, Comment) VALUES(?, ?, ?, ?, ?)', (id, date, user, userlink, comment))
 
             itemDetails = soup.find('div', 'right_sidebar_table')
@@ -273,7 +275,7 @@ if __name__ == '__main__':
                         c.execute('INSERT OR REPLACE INTO issue_metadata (IssueID, Name, Value) VALUES(?, ?, ?)', (id, name, value))                
 
             # check the description for XML fields and update the meta data from that information
-            description = html2text.html2text(soup.find('p', style='white-space: pre-wrap').prettify())
+            description = html2text.html2text(soup.find('div', id='descriptionContent').prettify())
             for xml_field in xml_fields:
                 replaceAll = True
                 xml_start_tag = '<' + xml_field + '>'
@@ -344,6 +346,9 @@ if __name__ == '__main__':
         if maxCount > 0 and count >= maxCount:
             break
 
+	if row[3] == 'Closed' and skip_closed:
+            continue
+
         print '%.2f%% - Importing issue %d to GitHub repo %s' % ((count / (len(rows) * 1.0)) * 100, row[0], repo.name)
         if gh.rate_limiting[0] < 100:
             print 'WARNING: GitHub API rate limit approaching soon (100 requests left)!'
@@ -389,6 +394,14 @@ if __name__ == '__main__':
             
             gist_files[attachment[0]] = github.InputFileContent(content)
             
+        continuation = None
+        if len(body) >= (64*1024):
+            last_index = (64*1024)
+            while body[last_index] not in [' ', '\t', '\n', '\r'] and last_index > 0:
+                last_index -= 1
+            continuation = body[last_index:]
+            #body =  
+
         if gist_files:
             g = user.create_gist(True, gist_files, 'CodePlex Issue #%d Plain Text Attachments' % row[0])
             body += '\n\n#### Plaintext Attachments\n\n[%s](%s)' % (g.description, g.html_url)            
@@ -406,9 +419,6 @@ if __name__ == '__main__':
 
         c.execute('SELECT Date, User, Link, Comment, IssueID FROM comments WHERE IssueID=? ORDER BY Date ASC', (row[0], ))
         for comment in sorted(c.fetchall(), cmp=lambda x, y: cmp(x[0], y[0])):
-            if row[0] == 1019:
-                print comment
-                raw_input('waiting so you can see comments on item 1019')
             commentDate = time.gmtime(comment[0])[:6]
             commentDate = datetime.datetime(*commentDate)
             commentor = comment[1].strip()
@@ -432,12 +442,13 @@ if __name__ == '__main__':
             if 'labels' not in parameters:
                 parameters['labels'] = []
 
-            if label[0] not in existingLabels:
-                l = repo.create_label(label[0], '000000')
-                parameters['labels'].append(l.name)
-                existingLabels.append(l.name)
-            else:
-                parameters['labels'].append(label[0])
+            if len(label[0]):
+                if (label[0] not in existingLabels):
+                    l = repo.create_label(label[0], '000000')
+                    parameters['labels'].append(l.name)
+                    existingLabels.append(l.name)
+                else:
+                    parameters['labels'].append(label[0])
 
         if row[3] == 'Closed':
             parameters['state'] = 'closed'
