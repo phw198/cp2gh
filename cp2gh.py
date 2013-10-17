@@ -1,4 +1,4 @@
-"""Usage: cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
+"""Usage: cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--skipclosed] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
           
 
 Process FILE and optionally apply correction to either left-hand side or
@@ -17,7 +17,7 @@ Options:
   --ghorg=GHORG     the organization that owns the repo, if not specified, the GHUSER will be used as owner
   --usermap=USERMAP load a file which maps CodePlex users to GitHub users
   --skipcp          skip parsing data from CodePlex and use existing issues.db file
-  --skip-closed     skip importing issues that are closed on CodePlex
+  --skipclosed     skip importing issues that are closed on CodePlex
   --count=COUNT     the number of issues to import (used mainly for testing)
 
 """
@@ -31,6 +31,7 @@ import sqlite3
 import datetime
 import time
 import mimetypes
+import textwrap
 
 from docopt import docopt
 
@@ -46,7 +47,7 @@ def is_plain_text_file(filename):
         ext = ''
         if len(parts) > 1:
             ext = parts[1]
-        return ext.lower() not in ['.dll', '.dat', '.zip', '.exe', '.7z', '.png', '.jpg', '.jpeg', '.docx', '.doc', '.ppt', '.pptx', '.xls', '.xlsx', '.bmp', '.gif', '.rtf', '.swf', '.blg']    
+        return ext.lower() not in ['.dll', '.dat', '.zip', '.exe', '.7z', '.png', '.jpg', '.jpeg', '.docx', '.doc', '.ppt', '.pptx', '.xls', '.xlsx', '.bmp', '.gif', '.rtf', '.swf', '.blg', '.rar']    
     else:
        return mime[0].startswith('text')
 
@@ -58,7 +59,7 @@ if __name__ == '__main__':
     password = options['--ghpass']
     org = options['--ghorg']
     skipcp = ('--skipcp' in options) and options['--skipcp']
-    skip_closed = ('--skip-closed' in options) and options['--skip-closed']
+    skip_closed = ('--skipclosed' in options) and options['--skipclosed']
     curPage = 0
     maxCount = -1
     if options['--count']:
@@ -80,6 +81,7 @@ if __name__ == '__main__':
                  Description TEXT DEFAULT '',
                  LastUpdate INTEGER DEFAULT -1,
                  Updated INTEGER DEFAULT 0,
+                 Done INTEGER DEFAULT 0,
                  GitHubIssueID INTEGER DEFAULT -1)""")
 
     c.execute("""CREATE TABLE IF NOT EXISTS comments (
@@ -321,7 +323,12 @@ if __name__ == '__main__':
     if org:
         repo = gh.get_organization(org).get_repo(GHREPO)
     else:
-        repo = user.get_repo(GHREPO)
+        if '/' in GHREPO:
+            (owner, GHREPO) = GHREPO.split('/')
+            owner = gh.get_user(owner)
+            repo = owner.get_repo(GHREPO)
+        else:
+            repo = user.get_repo(GHREPO)
     
     if not repo:
         print 'Unable to access %s as user %s' % (GHREPO, username)
@@ -340,13 +347,13 @@ if __name__ == '__main__':
 
     existingMilestones = {x.title : x.number for x in repo.get_milestones()}
     existingMilestones.update({x.title : x.number for x in repo.get_milestones(state='closed')})
-    c.execute('SELECT ID, Title, Description, Status, Assignee FROM issues ORDER BY ID')
+    c.execute('SELECT ID, Title, Description, Status, Assignee FROM issues WHERE Done=0 ORDER BY ID')
     rows = c.fetchall()
     for row in rows:
         if maxCount > 0 and count >= maxCount:
             break
 
-	if row[3] == 'Closed' and skip_closed:
+        if row[3] == 'Closed' and skip_closed:
             continue
 
         print '%.2f%% - Importing issue %d to GitHub repo %s' % ((count / (len(rows) * 1.0)) * 100, row[0], repo.name)
@@ -394,13 +401,10 @@ if __name__ == '__main__':
             
             gist_files[attachment[0]] = github.InputFileContent(content)
             
-        continuation = None
-        if len(body) >= (64*1024):
-            last_index = (64*1024)
-            while body[last_index] not in [' ', '\t', '\n', '\r'] and last_index > 0:
-                last_index -= 1
-            continuation = body[last_index:]
-            #body =  
+        continuations = []
+        if len(body) >= (60*1024):
+            continuations = textwrap.wrap(body, 60*1024)      
+            body = continuations.pop(0)              
 
         if gist_files:
             g = user.create_gist(True, gist_files, 'CodePlex Issue #%d Plain Text Attachments' % row[0])
@@ -413,6 +417,10 @@ if __name__ == '__main__':
             body += '[%s](%s)' % (attachment[0], attachment[1])
 
         ghIssue = repo.create_issue(row[1], body=body, assignee=assignee)
+
+        if continuations:
+            for comment in continuations:
+                ghIssue.create_comment(comment)
 
         #if isinstance(assignee, github.NamedUser.NamedUser):
         #    repo.remove_from_collaborators(assignee)
@@ -456,7 +464,8 @@ if __name__ == '__main__':
         # update the issue with the information
         ghIssue.edit(**parameters)
 
-        c.execute('UPDATE issues SET Updated=0, GitHubIssueID=? WHERE ID=?', (ghIssue.id, row[0]))
+        c.execute('UPDATE issues SET Done=1, Updated=0, GitHubIssueID=? WHERE ID=?', (ghIssue.id, row[0]))
+        conn.commit()
 
         count += 1
         
