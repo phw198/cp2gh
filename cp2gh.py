@@ -1,4 +1,4 @@
-"""Usage: cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--skipclosed] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
+"""Usage: cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--onlyopen] [--filter=<f>] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
           
 
 Process FILE and optionally apply correction to either left-hand side or
@@ -17,7 +17,8 @@ Options:
   --ghorg=GHORG     the organization that owns the repo, if not specified, the GHUSER will be used as owner
   --usermap=USERMAP load a file which maps CodePlex users to GitHub users
   --skipcp          skip parsing data from CodePlex and use existing issues.db file
-  --skipclosed     skip importing issues that are closed on CodePlex
+  --onlyopen        only import issues that are currently open on CodePlex (this only matters during import from CodePlex to the database)
+  --filter=<f>      skip importing issues based on filtering (this will be appended to the WHERE clause)
   --count=COUNT     the number of issues to import (used mainly for testing)
 
 """
@@ -59,11 +60,19 @@ if __name__ == '__main__':
     password = options['--ghpass']
     org = options['--ghorg']
     skipcp = ('--skipcp' in options) and options['--skipcp']
-    skip_closed = ('--skipclosed' in options) and options['--skipclosed']
+    only_open = ('--onlyopen' in options) and options['--onlyopen']
     curPage = 0
     maxCount = -1
+    filter = '' 
+#    start_date = (datetime.datetime(1970,1,1) - datetime.datetime(1970,1,1)).total_seconds()
     if options['--count']:
         maxCount=int(options['--count'])
+    if options['--filter']:
+        filter = options['--filter']
+
+    #if options['--start']:
+    #    d = datetime.datetime(1970,1,1)
+    #    start_date = (d.strptime(options['--start'], '%d/%m/%Y') - datetime.datetime(1970,1,1)).total_seconds()
 
     issues = {}
     usermap = {}
@@ -81,6 +90,7 @@ if __name__ == '__main__':
                  Description TEXT DEFAULT '',
                  LastUpdate INTEGER DEFAULT -1,
                  Updated INTEGER DEFAULT 0,
+                 Votes INTEGER DEFAULT 0,
                  Done INTEGER DEFAULT 0,
                  GitHubIssueID INTEGER DEFAULT -1)""")
 
@@ -130,6 +140,9 @@ if __name__ == '__main__':
     if not skipcp:
         while True:
             contentRead = False
+            #if only_open:
+            #    link = 'http://%s.codeplex.com/workitem/list/advanced?keyword=&status=Open%%20(not%%20closed)&type=All&priority=All&release=All&assignedTo=All&component=All&sortField=Id&sortDirection=Ascending&size=100&page=%d' % (CPPROJECT, curPage)
+            #else:
             link = 'http://%s.codeplex.com/workitem/list/advanced?keyword=&status=All&type=All&priority=All&release=All&assignedTo=All&component=All&sortField=Id&sortDirection=Ascending&size=100&page=%d' % (CPPROJECT, curPage)
             while not contentRead:
                 try:
@@ -180,10 +193,11 @@ if __name__ == '__main__':
             issueRows = soup.find_all('tr', id=re.compile(r'row_checkbox_\d+'))
             for issueRow in issueRows:            
                 id = int(issueRow.find('td', 'ID').text)
+                votes = int(issueRow.find('td', 'Votes').text)
                 assignedTo = issueRow.find('td', 'AssignedTo').text.strip()
                 updateDate = int(issueRow.find('span', 'smartDate')['localtimeticks'])
-                c.execute("""INSERT OR REPLACE INTO issues (ID, Title, Link, Assignee, Status, LastUpdate, Updated) VALUES(?, ?, ?, ?, ?, ?, 1)""",
-                          (id, issueRow.find('a', id=titleLinkRE).text, issueRow.find('a', id=titleLinkRE)['href'], assignedTo, issueRow.find('td', 'Status').text, updateDate))
+                c.execute("""INSERT OR REPLACE INTO issues (ID, Title, Link, Assignee, Status, LastUpdate, Votes, Updated) VALUES(?, ?, ?, ?, ?, ?, ?, 1)""",
+                          (id, issueRow.find('a', id=titleLinkRE).text, issueRow.find('a', id=titleLinkRE)['href'], assignedTo, issueRow.find('td', 'Status').text, updateDate, votes))
                 severity = issueRow.find('td', 'Severity').text.lower()
                 if not len(severity.strip()):
                     severity = 'low'
@@ -347,126 +361,191 @@ if __name__ == '__main__':
 
     existingMilestones = {x.title : x.number for x in repo.get_milestones()}
     existingMilestones.update({x.title : x.number for x in repo.get_milestones(state='closed')})
-    c.execute('SELECT ID, Title, Description, Status, Assignee FROM issues WHERE Done=0 ORDER BY ID')
+    if filter:
+        f = 'SELECT ID, Title, Description, Status, Assignee, Votes, LastUpdate FROM issues WHERE Done=0 AND (%s) ORDER BY ID' % filter
+        c.execute('SELECT ID, Title, Description, Status, Assignee, Votes, LastUpdate FROM issues WHERE Done=0 AND (%s) ORDER BY ID' % filter)
+    else:
+        c.execute('SELECT ID, Title, Description, Status, Assignee, Votes, LastUpdate FROM issues WHERE Done=0 ORDER BY ID')
     rows = c.fetchall()
+
     for row in rows:
-        if maxCount > 0 and count >= maxCount:
-            break
+        done = False
 
-        if row[3] == 'Closed' and skip_closed:
-            continue
+        while not done:
+            if maxCount > 0 and count >= maxCount:
+                print 'Max count of issues reached'
+                done = True
+                count = count + 1
+                break
+            
+            print '%.2f%% - Importing issue %d to GitHub repo %s' % ((count / (len(rows) * 1.0)) * 100, row[0], repo.name)
+            if gh.rate_limiting[0] < 100:
+                print 'WARNING: GitHub API rate limit approaching soon (100 requests left)!'
 
-        print '%.2f%% - Importing issue %d to GitHub repo %s' % ((count / (len(rows) * 1.0)) * 100, row[0], repo.name)
-        if gh.rate_limiting[0] < 100:
-            print 'WARNING: GitHub API rate limit approaching soon (100 requests left)!'
+            if gh.rate_limiting[0] == 0:
+                print 'ERROR: GitHub API rate limit exceeded!'
+                sys.exit(-1)
 
-        if gh.rate_limiting[0] == 0:
-            print 'ERROR: GitHub API rate limit exceeded!'
-            sys.exit(-1)
+            body = row[2]
+            assignee = github.GithubObject.NotSet
+            if row[4]:
+                c.execute('SELECT GitHubId FROM usermap WHERE CodePlexId=?', (row[4], ))
+                u = c.fetchone()
+                if u:
+                    assignee = gh.get_user(u[0])
+                    if isinstance(assignee, github.NamedUser.NamedUser) and assignee.login not in collaborators:
+                        assignee = github.GithubObject.NotSet
+                        #repo.add_to_collaborators(assignee)
+                        #existingCollaborators.append(assignee.login)
 
-        body = row[2]
-        assignee = github.GithubObject.NotSet
-        if row[4]:
-            c.execute('SELECT GitHubId FROM usermap WHERE CodePlexId=?', (row[4], ))
-            u = c.fetchone()
-            if u:
-                assignee = gh.get_user(u[0])
-                if isinstance(assignee, github.NamedUser.NamedUser) and assignee.login not in collaborators:
-                    assignee = github.GithubObject.NotSet
-                    #repo.add_to_collaborators(assignee)
-                    #existingCollaborators.append(assignee.login)
+            c.execute('SELECT LinkText, Href FROM attachments WHERE IssueID=?', (row[0], ))
 
-        c.execute('SELECT LinkText, Href FROM attachments WHERE IssueID=?', (row[0], ))
+            attachments = c.fetchall()
+            plaintext_attachments = [x for x in attachments if is_plain_text_file(x[0])]
+            binary_attachments = [x for x in attachments if not is_plain_text_file(x[0])]
 
-        attachments = c.fetchall()
-        plaintext_attachments = [x for x in attachments if is_plain_text_file(x[0])]
-        binary_attachments = [x for x in attachments if not is_plain_text_file(x[0])]
-
-        gist_files = {}
-        for attachment in plaintext_attachments:
-            # create gist and link to that instead...
-            req = urllib2.urlopen(attachment[1])
-            encoding = req.headers.getparam('charset')
-            contentOrig = req.read()
-            if not encoding:                
-                encodings = ['utf8', 'cp1252']
-                for encoding in encodings:
+            gist_files = {}
+            for attachment in plaintext_attachments:
+                # create gist and link to that instead...
+                contentRead = False
+                while not contentRead:
                     try:
-                        content = contentOrig.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        content = contentOrig
-            else:
-                content = contentOrig.decode(encoding)
-            
-            gist_files[attachment[0]] = github.InputFileContent(content)
-            
-        continuations = []
-        if len(body) >= (60*1024):
-            continuations = textwrap.wrap(body, 60*1024)      
-            body = continuations.pop(0)              
-
-        if gist_files:
-            g = user.create_gist(True, gist_files, 'CodePlex Issue #%d Plain Text Attachments' % row[0])
-            body += '\n\n#### Plaintext Attachments\n\n[%s](%s)' % (g.description, g.html_url)            
-
-        if binary_attachments:
-            body += '\n\n#### Binary Attachments\n\n'
-        for attachment in binary_attachments:
-            # best we can do is put in a link to the original attachment on CodePlex...            
-            body += '[%s](%s)' % (attachment[0], attachment[1])
-
-        ghIssue = repo.create_issue(row[1], body=body, assignee=assignee)
-
-        if continuations:
-            for comment in continuations:
-                ghIssue.create_comment(comment)
-
-        #if isinstance(assignee, github.NamedUser.NamedUser):
-        #    repo.remove_from_collaborators(assignee)
-
-        c.execute('SELECT Date, User, Link, Comment, IssueID FROM comments WHERE IssueID=? ORDER BY Date ASC', (row[0], ))
-        for comment in sorted(c.fetchall(), cmp=lambda x, y: cmp(x[0], y[0])):
-            commentDate = time.gmtime(comment[0])[:6]
-            commentDate = datetime.datetime(*commentDate)
-            commentor = comment[1].strip()
-            if commentor in ['', u'']:
-                commentor = 'unknown user'
-            ghIssue.create_comment('On *%s*, **%s** commented:\n\n%s' % (commentDate.strftime('%Y-%m-%d %H:%M:%S UTC'), commentor, comment[3]))
-            time.sleep(2)    
-
-        m = c.execute('SELECT Milestone FROM issue_to_milestone WHERE IssueID=?', (row[0], )).fetchone()
-        parameters = {}
-        if m:
-            if m[0] in existingMilestones.keys():
-                parameters['milestone'] = repo.get_milestone(existingMilestones[m[0]])
-            else:
-                milestone = repo.create_milestone(m[0])
-                existingMilestones[milestone.title] = milestone.number
-                parameters['milestone'] = milestone
-
-        c.execute('SELECT Label FROM issue_to_label WHERE IssueID=?', (row[0], ))
-        for label in c.fetchall():
-            if 'labels' not in parameters:
-                parameters['labels'] = []
-
-            if len(label[0]):
-                if (label[0] not in existingLabels):
-                    l = repo.create_label(label[0], '000000')
-                    parameters['labels'].append(l.name)
-                    existingLabels.append(l.name)
+                        req = urllib2.urlopen(attachment[1])
+                        encoding = req.headers.getparam('charset')
+                        contentOrig = req.read()
+                        contentRead = True
+                    except urllib2.URLError:
+                        print 'Error retrieving URL (%s)...waiting 10 seconds to try again' % link
+                        time.sleep(10)
+                    except urllib2.HTTPError:
+                        print 'HTTP error retrieving URL (%s)...waiting 10 seconds to try again' % link
+                        time.sleep(10)
+                    except KeyboardInterrupt:
+                        raw_input('Press enter to exit cp2gh')
+                        sys.exit(-1)
+                
+                if not encoding:                
+                    encodings = ['utf8', 'cp1252']
+                    for encoding in encodings:
+                        try:
+                            content = contentOrig.decode(encoding)
+                            break
+                        except UnicodeDecodeError:
+                            content = contentOrig
                 else:
-                    parameters['labels'].append(label[0])
-
-        if row[3] == 'Closed':
-            parameters['state'] = 'closed'
+                    content = contentOrig.decode(encoding)
             
-        # update the issue with the information
-        ghIssue.edit(**parameters)
+                gist_files[attachment[0]] = github.InputFileContent(content)
+            
+            continuations = []
+            if len(body) >= (60*1024):
+                continuations = textwrap.wrap(body, 60*1024)      
+                body = continuations.pop(0)              
 
-        c.execute('UPDATE issues SET Done=1, Updated=0, GitHubIssueID=? WHERE ID=?', (ghIssue.id, row[0]))
-        conn.commit()
+            if gist_files:
+                created = False
+                while not created:
+                    try:
+                        g = user.create_gist(True, gist_files, 'CodePlex Issue #%d Plain Text Attachments' % row[0])
+                        body += '\n\n#### Plaintext Attachments\n\n[%s](%s)' % (g.description, g.html_url)            
+                        created = True
+                    except:
+                        print '\tError creating gist, retrying in 2 seconds'
+                        time.sleep(2)
 
-        count += 1
-        
+            if binary_attachments:
+                body += '\n\n#### Binary Attachments\n\n'
+            for attachment in binary_attachments:
+                # best we can do is put in a link to the original attachment on CodePlex...            
+                body += '[%s](%s)' % (attachment[0], attachment[1])
+
+            created = False
+            while not created:
+                try:
+                    ghIssue = repo.create_issue(row[1], body=body, assignee=assignee)
+                    created = True
+                except:
+                    print '\tError creating issue, retrying in 2 seconds'
+                    time.sleep(2)
+
+            if continuations:
+                for comment in continuations:
+                    created = False
+                    while not created:
+                        try:
+                            ghIssue.create_comment(comment)
+                            created = True
+                        except:
+                            print '\tError creating comment, retrying in 2 seconds'
+                            time.sleep(2)
+
+            #if isinstance(assignee, github.NamedUser.NamedUser):
+            #    repo.remove_from_collaborators(assignee)
+
+            c.execute('SELECT Date, User, Link, Comment, IssueID FROM comments WHERE IssueID=? ORDER BY Date ASC', (row[0], ))
+            for comment in sorted(c.fetchall(), cmp=lambda x, y: cmp(x[0], y[0])):
+                commentDate = time.gmtime(comment[0])[:6]
+                commentDate = datetime.datetime(*commentDate)
+                commentor = comment[1].strip()
+                if commentor in ['', u'']:
+                    commentor = 'unknown user'
+                created = False
+                while not created:
+                    try:
+                        ghIssue.create_comment('On *%s*, **%s** commented:\n\n%s' % (commentDate.strftime('%Y-%m-%d %H:%M:%S UTC'), commentor, comment[3]))
+                        created = True
+                    except:
+                        print '\tError creating comment, retrying in 2 seconds'
+                        time.sleep(2)
+                time.sleep(2)    
+
+            m = c.execute('SELECT Milestone FROM issue_to_milestone WHERE IssueID=?', (row[0], )).fetchone()
+            parameters = {}
+            if m:
+                if m[0] in existingMilestones.keys():
+                    parameters['milestone'] = repo.get_milestone(existingMilestones[m[0]])
+                else:
+                    created = False
+                    while not created:
+                        try:
+                            milestone = repo.create_milestone(m[0])
+                            created = True
+                        except:
+                            print '\tError creating milestone, retrying in 2 seconds'
+                            time.sleep(2)
+                    existingMilestones[milestone.title] = milestone.number
+                    parameters['milestone'] = milestone
+
+            c.execute('SELECT Label FROM issue_to_label WHERE IssueID=?', (row[0], ))
+            for label in c.fetchall():
+                if 'labels' not in parameters:
+                    parameters['labels'] = []
+
+                if len(label[0]):
+                    if (label[0] not in existingLabels):
+                        l = repo.create_label(label[0], '000000')
+                        parameters['labels'].append(l.name)
+                        existingLabels.append(l.name)
+                    else:
+                        parameters['labels'].append(label[0])
+
+            if row[3] == 'Closed':
+                parameters['state'] = 'closed'
+            
+            # update the issue with the information
+            updated = False
+            while not updated:
+                try:
+                    ghIssue.edit(**parameters)
+                    updated = True
+                except:
+                    print '\tError updating issue, retrying in 2 seconds'
+                    time.sleep(2)
+
+            c.execute('UPDATE issues SET Done=1, Updated=0, GitHubIssueID=? WHERE ID=?', (ghIssue.id, row[0]))
+            conn.commit()
+
+            count += 1
+            done = True
+    
     raw_input('Press enter to continue...')

@@ -5,7 +5,7 @@ Imports issues from CodePlex projects to a GitHub repo.
 
 usage
 =====
-cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
+cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--openonly] [--filter=<f>] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
 
 
 Process FILE and optionally apply correction to either left-hand side or
@@ -38,3 +38,9 @@ Options:
   --skipcp          skip parsing data from CodePlex and use existing issues.db file
 
   --count=COUNT     the number of issues to import (used mainly for testing)
+
+  --openonly	    only migrate open issues from CodePlex to the database
+
+  --filter=<f>      Add a filter to the WHERE clause when migrating from the database to GitHub (after importing from CodePlex)
+
+  
