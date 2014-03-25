@@ -8,8 +8,7 @@ usage
 cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--openonly] [--filter=<f>] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
 
 
-Process FILE and optionally apply correction to either left-hand side or
-right-hand side.
+Processes the issues list for CPPROJECT and imports then to GHREPO
 
 
 Arguments:
