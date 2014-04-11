@@ -33,6 +33,7 @@ import datetime
 import time
 import mimetypes
 import textwrap
+import math
 
 from docopt import docopt
 
@@ -382,9 +383,12 @@ if __name__ == '__main__':
             if gh.rate_limiting[0] < 100:
                 print 'WARNING: GitHub API rate limit approaching soon (100 requests left)!'
 
-            if gh.rate_limiting[0] == 0:
-                print 'ERROR: GitHub API rate limit exceeded!'
-                sys.exit(-1)
+            while gh.rate_limiting[0] == 0:                
+                d = datetime.datetime.utcfromtimestamp(gh.rate_limiting_resettime)-datetime.datetime.utcnow()
+                mins = math.floor(d.total_seconds() / 60)
+                secs = math.ceil(d.total_seconds() - (mins * 60))
+                print 'GitHub API rate limit exceeded need to wait %d minutes %d seconds for reset!' % (mins, secs)
+                time.sleep(d.total_seconds())
 
             body = row[2]
             assignee = github.GithubObject.NotSet
