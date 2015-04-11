@@ -1,4 +1,4 @@
-"""Usage: cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--onlyopen] [--filter=<f>] [--count=COUNT] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
+"""Usage: cp2gh [-vq] [--usermap=USERMAP] [--skipcp] [--onlyopen] [--filter=<f>] [--count=COUNT] [--severity=SEVERITIES] [--tag-filter=TAGS] --ghuser=GHUSER --ghpass=GHPASS [--ghorg=GHORG] CPPROJECT GHREPO
           
 
 Process FILE and optionally apply correction to either left-hand side or
@@ -10,16 +10,18 @@ Arguments:
 
 Options:
   -h --help
-  -v                verbose mode
-  -q                quiet mode
-  --ghuser=GHUSER   the username for GitHub authentication
-  --ghpass=GHPASS   the password for GutHub authentication
-  --ghorg=GHORG     the organization that owns the repo, if not specified, the GHUSER will be used as owner
-  --usermap=USERMAP load a file which maps CodePlex users to GitHub users
-  --skipcp          skip parsing data from CodePlex and use existing issues.db file
-  --onlyopen        only import issues that are currently open on CodePlex (this only matters during import from CodePlex to the database)
-  --filter=<f>      skip importing issues based on filtering (this will be appended to the WHERE clause)
-  --count=COUNT     the number of issues to import (used mainly for testing)
+  -v                      verbose mode
+  -q                      quiet mode
+  --ghuser=GHUSER         the username for GitHub authentication
+  --ghpass=GHPASS         the password for GutHub authentication
+  --ghorg=GHORG           the organization that owns the repo, if not specified, the GHUSER will be used as owner
+  --usermap=USERMAP       load a file which maps CodePlex users to GitHub users
+  --skipcp                skip parsing data from CodePlex and use existing issues.db file
+  --severity=SEVERITY     comma separated list of severities to keep (usually things like, e.g., 'high,medium')
+  --tag-filter=TAGFILTER  a list of tags to filter out
+  --onlyopen              only import issues that are currently open on CodePlex (this only matters during import from CodePlex to the database)
+  --filter=<f>            skip importing issues based on filtering (this will be appended to the WHERE clause)
+  --count=COUNT           the number of issues to import (used mainly for testing)
 
 """
 
@@ -65,6 +67,9 @@ if __name__ == '__main__':
     curPage = 0
     maxCount = -1
     filter = '' 
+    validSeverities = [x.strip() for x in options['--severity'].split(',')]
+    tagFilter = [x.strip() for x in options['--tag-filter'].split(',')]
+
 #    start_date = (datetime.datetime(1970,1,1) - datetime.datetime(1970,1,1)).total_seconds()
     if options['--count']:
         maxCount=int(options['--count'])
@@ -208,11 +213,13 @@ if __name__ == '__main__':
                     issueType = 'bug'
                 elif issueType == 'feature':
                     issueType = 'enhancement'
+                elif issueType == 'unassigned':
+                    issueType = None
 
-                #c.execute('INSERT OR REPLACE INTO labels (Label) VALUES(?)', (severity, ))
-                #c.execute('INSERT OR REPLACE INTO labels (Label) VALUES(?)', (issueType, ))
-                c.execute('INSERT OR REPLACE INTO issue_to_label (IssueID, Label) VALUES(?, ?)', (id, severity))
-                c.execute('INSERT OR REPLACE INTO issue_to_label (IssueID, Label) VALUES(?, ?)', (id, issueType))
+                if not validSeverities or severity in validSeverities:
+                    c.execute('INSERT OR REPLACE INTO issue_to_label (IssueID, Label) VALUES(?, ?)', (id, severity))
+                if issueType:
+                    c.execute('INSERT OR REPLACE INTO issue_to_label (IssueID, Label) VALUES(?, ?)', (id, issueType))
 
             if curPage >= totalPages:
                 break
@@ -330,13 +337,15 @@ if __name__ == '__main__':
             count += 1
         conn.commit()
 
-    raw_input('Please press any key to continue to import the issues to GitHub...')
+        raw_input('Please press any key to continue to import the issues to GitHub...')
     
     count = 0
-    gh = github.Github(username, password)
+    gh = github.Github(username, password, timeout=120)
     user = gh.get_user()
+
     if org:
-        repo = gh.get_organization(org).get_repo(GHREPO)
+        org = gh.get_organization(org)
+        repo = org.get_repo(GHREPO)
     else:
         if '/' in GHREPO:
             (owner, GHREPO) = GHREPO.split('/')
@@ -419,10 +428,10 @@ if __name__ == '__main__':
                         contentOrig = req.read()
                         contentRead = True
                     except urllib2.URLError:
-                        print 'Error retrieving URL (%s)...waiting 10 seconds to try again' % link
+                        print 'Error retrieving URL (%s)...waiting 10 seconds to try again' % attachment[1]
                         time.sleep(10)
                     except urllib2.HTTPError:
-                        print 'HTTP error retrieving URL (%s)...waiting 10 seconds to try again' % link
+                        print 'HTTP error retrieving URL (%s)...waiting 10 seconds to try again' % attachment[1]
                         time.sleep(10)
                     except KeyboardInterrupt:
                         raw_input('Press enter to exit cp2gh')
@@ -442,8 +451,8 @@ if __name__ == '__main__':
                 gist_files[attachment[0]] = github.InputFileContent(content)
             
             continuations = []
-            if len(body) >= (60*1024):
-                continuations = textwrap.wrap(body, 60*1024)      
+            if len(body) >= (32*1024):
+                continuations = textwrap.wrap(body, 32*1024)      
                 body = continuations.pop(0)              
 
             if gist_files:
@@ -468,6 +477,9 @@ if __name__ == '__main__':
                 try:
                     ghIssue = repo.create_issue(row[1], body=body, assignee=assignee)
                     created = True
+                except github.GithubException, exception:
+                    print '\tError creating issue, retrying in 2 seconds (%s)' % exception
+                    time.sleep(2)
                 except:
                     print '\tError creating issue, retrying in 2 seconds'
                     time.sleep(2)
@@ -525,7 +537,7 @@ if __name__ == '__main__':
                 if 'labels' not in parameters:
                     parameters['labels'] = []
 
-                if len(label[0]):
+                if len(label[0]) and ((not validSeverities or label[0] in validSeverities) or (not tagFilter or label[0] in tagFilter)):
                     if (label[0] not in existingLabels):
                         l = repo.create_label(label[0], '000000')
                         parameters['labels'].append(l.name)
