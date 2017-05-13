@@ -56,6 +56,7 @@ def is_plain_text_file(filename):
        return mime[0].startswith('text')
 
 if __name__ == '__main__':
+    print("Parsing arguments...")
     options = docopt(__doc__)  # parse arguments based on docstring above
     CPPROJECT = options['CPPROJECT']
     GHREPO = options['GHREPO']
@@ -67,8 +68,11 @@ if __name__ == '__main__':
     curPage = 0
     maxCount = -1
     filter = '' 
-    validSeverities = [x.strip() for x in options['--severity'].split(',')]
-    tagFilter = [x.strip() for x in options['--tag-filter'].split(',')]
+    validSeverities = ''
+    if  options['--severity']:
+        validSeverities = [x.strip() for x in options['--severity'].split(',')]
+    if  options['--tag-filter']:
+        tagFilter = [x.strip() for x in options['--tag-filter'].split(',')]
 
 #    start_date = (datetime.datetime(1970,1,1) - datetime.datetime(1970,1,1)).total_seconds()
     if options['--count']:
@@ -82,6 +86,8 @@ if __name__ == '__main__':
 
     issues = {}
     usermap = {}
+
+    print("Connecting to database...")
 
     conn = sqlite3.connect('issues.db')
     c = conn.cursor()
@@ -144,12 +150,14 @@ if __name__ == '__main__':
     commentRE = re.compile('CommentContainer\d+')
     fileLinkRE = re.compile('FileLink\d+')    
     if not skipcp:
+	      c.execute('DELETE FROM issues')
         while True:
             contentRead = False
-            #if only_open:
-            #    link = 'http://%s.codeplex.com/workitem/list/advanced?keyword=&status=Open%%20(not%%20closed)&type=All&priority=All&release=All&assignedTo=All&component=All&sortField=Id&sortDirection=Ascending&size=100&page=%d' % (CPPROJECT, curPage)
-            #else:
-            link = 'http://%s.codeplex.com/workitem/list/advanced?keyword=&status=All&type=All&priority=All&release=All&assignedTo=All&component=All&sortField=Id&sortDirection=Ascending&size=100&page=%d' % (CPPROJECT, curPage)
+            if only_open:
+                link = 'http://%s.codeplex.com/workitem/list/advanced?keyword=&status=Open%%20(not%%20closed)&type=All&priority=All&release=All&assignedTo=All&component=All&sortField=Id&sortDirection=Ascending&size=100&page=%d' % (CPPROJECT, curPage)
+            else:
+                link = 'http://%s.codeplex.com/workitem/list/advanced?keyword=&status=All&type=All&priority=All&release=All&assignedTo=All&component=All&sortField=Id&sortDirection=Ascending&size=100&page=%d' % (CPPROJECT, curPage)
+            print 'Reading content from CodePlex: %s' % link
             while not contentRead:
                 try:
                     request = urllib2.urlopen(link)
